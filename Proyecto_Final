@@ -1,0 +1,447 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Estructuras 
+
+typedef struct Order {
+    int id;
+    char destino[64];
+    int cantidad;
+    struct Order *next;
+} Order;
+
+typedef struct Queue {
+    Order *head;
+    Order *tail;
+    int size;
+} Queue;
+
+typedef struct Node {
+    int fecha;              // AAAAMMDD como entero clave
+    char producto[64];
+    int stock;
+    Queue pedidos;          // cola FIFO
+    struct Node *left;
+    struct Node *right;
+    int height;
+} Node;
+
+// Utilidades de Cola FIFO 
+
+void initQueue(Queue *q) {
+    q->head = q->tail = NULL;
+    q->size = 0;
+}
+
+Order* createOrder(int id, const char *destino, int cantidad) {
+    Order *o = (Order*)malloc(sizeof(Order));
+    if(!o){ perror("malloc order"); exit(EXIT_FAILURE);}
+    o->id = id;
+    strncpy(o->destino, destino, sizeof(o->destino)-1);
+    o->destino[sizeof(o->destino)-1] = '\0';
+    o->cantidad = cantidad;
+    o->next = NULL;
+    return o;
+}
+
+void enqueue(Queue *q, Order *o) {
+    if(q->tail) q->tail->next = o;
+    else q->head = o;
+    q->tail = o;
+    q->size++;
+}
+
+int dequeue(Queue *q, Order **out) {
+    if(!q->head) return 0;
+    Order *o = q->head;
+    q->head = o->next;
+    if(q->head == NULL) q->tail = NULL;
+    o->next = NULL;
+    q->size--;
+    *out = o;
+    return 1;
+}
+
+void freeQueue(Queue *q) {
+    Order *cur = q->head;
+    while(cur){
+        Order *n = cur->next;
+        free(cur);
+        cur = n;
+    }
+    initQueue(q);
+}
+
+// Utilidades AVL (Altura, Rotaciones) 
+
+int maxi(int a, int b) { return a > b ? a : b; }
+
+int height(Node *n) {
+    return n ? n->height : 0;
+}
+
+Node* rightRotate(Node *y) {
+    Node *x = y->left;
+    Node *T2 = x->right;
+
+    // rotación
+    x->right = y;
+    y->left = T2;
+
+    // actualizar alturas
+    y->height = 1 + maxi(height(y->left), height(y->right));
+    x->height = 1 + maxi(height(x->left), height(x->right));
+
+    return x;
+}
+
+Node* leftRotate(Node *x) {
+    Node *y = x->right;
+    Node *T2 = y->left;
+
+    y->left = x;
+    x->right = T2;
+
+    x->height = 1 + maxi(height(x->left), height(x->right));
+    y->height = 1 + maxi(height(y->left), height(y->right));
+
+    return y;
+}
+
+int getBalance(Node *n) {
+    if(!n) return 0;
+    return height(n->left) - height(n->right);
+}
+
+// Operaciones árbol AVL 
+
+Node* createNode(int fecha, const char *producto, int stock) {
+    Node *n = (Node*)malloc(sizeof(Node));
+    if(!n){ perror("malloc node"); exit(EXIT_FAILURE);}
+    n->fecha = fecha;
+    strncpy(n->producto, producto, sizeof(n->producto)-1);
+    n->producto[sizeof(n->producto)-1] = '\0';
+    n->stock = stock;
+    initQueue(&n->pedidos);
+    n->left = n->right = NULL;
+    n->height = 1;
+    return n;
+}
+
+// Buscar por clave exacta
+Node* searchNode(Node *root, int fecha) {
+    while(root) {
+        if(fecha == root->fecha) return root;
+        else if(fecha < root->fecha) root = root->left;
+        else root = root->right;
+    }
+    return NULL;
+}
+
+Node* insertAVL(Node *node, int fecha, const char *producto, int stock, int *inserted) {
+    if(!node) {
+        *inserted = 1;
+        return createNode(fecha, producto, stock);
+    }
+
+    if(fecha < node->fecha)
+        node->left = insertAVL(node->left, fecha, producto, stock, inserted);
+    else if(fecha > node->fecha)
+        node->right = insertAVL(node->right, fecha, producto, stock, inserted);
+    else {
+        // Si la fecha ya existe, según la especificación no crear duplicado;
+        // dejar inserted = 0 para que el llamador indique que no se procesa.
+        *inserted = 0;
+        return node;
+    }
+
+    node->height = 1 + maxi(height(node->left), height(node->right));
+    int balance = getBalance(node);
+
+    // LL
+    if(balance > 1 && fecha < node->left->fecha)
+        return rightRotate(node);
+    // RR
+    if(balance < -1 && fecha > node->right->fecha)
+        return leftRotate(node);
+    // LR
+    if(balance > 1 && fecha > node->left->fecha) {
+        node->left = leftRotate(node->left);
+        return rightRotate(node);
+    }
+    // RL
+    if(balance < -1 && fecha < node->right->fecha) {
+        node->right = rightRotate(node->right);
+        return leftRotate(node);
+    }
+
+    return node;
+}
+
+// Encontrar el nodo con la clave mínima (más próxima a vencer, fecha menor
+Node* minValueNode(Node* node) {
+    Node* current = node;
+    while(current && current->left) current = current->left;
+    return current;
+}
+
+// Eliminar nodo por fecha (clave) — libera su cola primero 
+Node* deleteNode(Node* root, int fecha) {
+    if(!root) return root;
+
+    if(fecha < root->fecha) root->left = deleteNode(root->left, fecha);
+    else if(fecha > root->fecha) root->right = deleteNode(root->right, fecha);
+    else {
+        // nodo encontrado
+        // liberar cola de pedidos
+        freeQueue(&root->pedidos);
+
+        if(!root->left || !root->right) {
+            Node *temp = root->left ? root->left : root->right;
+            if(!temp) {
+                // no hijos
+                temp = root;
+                root = NULL;
+            } else {
+                // un hijo
+                *root = *temp; // copia contenido
+            }
+            free(temp);
+        } else {
+            // dos hijos: reemplazar por inorder successor
+            Node *temp = minValueNode(root->right);
+            root->fecha = temp->fecha;
+            strncpy(root->producto, temp->producto, sizeof(root->producto)-1);
+            root->producto[sizeof(root->producto)-1] = '\0';
+            root->stock = temp->stock;
+            // liberar la cola actual (ya liberada antes), ahora duplicamos la cola de temp:
+            freeQueue(&root->pedidos);
+            // duplicar pedidos de temp
+            Order *cur = temp->pedidos.head;
+            initQueue(&root->pedidos);
+            while(cur){
+                Order *o = createOrder(cur->id, cur->destino, cur->cantidad);
+                enqueue(&root->pedidos, o);
+                cur = cur->next;
+            }
+
+            // eliminar el successor
+            root->right = deleteNode(root->right, temp->fecha);
+        }
+    }
+
+    if(!root) return root;
+
+    // actualizar y balancear
+    root->height = 1 + maxi(height(root->left), height(root->right));
+    int balance = getBalance(root);
+
+    // LL
+    if(balance > 1 && getBalance(root->left) >= 0)
+        return rightRotate(root);
+    // LR
+    if(balance > 1 && getBalance(root->left) < 0) {
+        root->left = leftRotate(root->left);
+        return rightRotate(root);
+    }
+    // RR
+    if(balance < -1 && getBalance(root->right) <= 0)
+        return leftRotate(root);
+    // RL
+    if(balance < -1 && getBalance(root->right) > 0) {
+        root->right = rightRotate(root->right);
+        return leftRotate(root);
+    }
+
+    return root;
+}
+
+// In-order traversal (más cercano a vencer = menor fecha) 
+void inorderReport(Node *root) {
+    if(!root) return;
+    inorderReport(root->left);
+    printf("Fecha: %d | Producto: %s | Stock disponible: %d | Pedidos en cola: %d\n",
+           root->fecha, root->producto, root->stock, root->pedidos.size);
+    inorderReport(root->right);
+}
+
+// Buscar el nodo con la fecha más cercana a vencer (mínima fecha) 
+Node* findNearestExpire(Node *root) {
+    return minValueNode(root);
+}
+
+// Buscar pedido por id en todas las colas del árbol; si lo encuentra, lo elimina y devuelve 1 
+int removeOrderFromTree(Node *root, int orderId) {
+    if(!root) return 0;
+    // revisar cola actual
+    Order *prev = NULL;
+    Order *cur = root->pedidos.head;
+    while(cur) {
+        if(cur->id == orderId) {
+            // lo encontramos; eliminar de la cola
+            if(prev) prev->next = cur->next;
+            else root->pedidos.head = cur->next;
+            if(cur == root->pedidos.tail) root->pedidos.tail = prev;
+            root->pedidos.size--;
+            // restaurar stock del nodo
+            root->stock += cur->cantidad;
+            free(cur);
+            return 1;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    // recorrer subárboles
+    if(removeOrderFromTree(root->left, orderId)) return 1;
+    if(removeOrderFromTree(root->right, orderId)) return 1;
+    return 0;
+}
+
+// Mostrar pedidos de un nodo 
+void printOrders(Node *n) {
+    if(!n) { printf("Nodo nulo.\n"); return; }
+    printf("Pedidos para fecha %d - %s (stock %d):\n", n->fecha, n->producto, n->stock);
+    Order *cur = n->pedidos.head;
+    if(!cur) { printf("  (ninguno)\n"); return; }
+    while(cur) {
+        printf("  [id=%d] destino='%s' cantidad=%d\n", cur->id, cur->destino, cur->cantidad);
+        cur = cur->next;
+    }
+}
+
+//  Liberar todo el árbol 
+void freeTree(Node *root) {
+    if(!root) return;
+    freeTree(root->left);
+    freeTree(root->right);
+    freeQueue(&root->pedidos);
+    free(root);
+}
+
+// Buscar y devolver nodo por fecha mínima >= 0 (ya implementado minValueNode).
+   Si se desea otro criterio (ej. fecha >= hoy) habría que pasar 'hoy' y filtrar. */
+
+// Interfaz / Menú 
+
+void flush_stdin() {
+    int c;
+    while((c = getchar()) != '\n' && c != EOF) {}
+}
+
+int main() {
+    Node *root = NULL;
+    int nextOrderId = 1;
+    int opcion;
+
+    printf("=== SISTEMA LOGÍSTICO (ABB con Balanceo AVL + Colas FIFO) ===\n");
+
+    do {
+        printf("\nMenú:\n");
+        printf("1) Recepción de Mercancía (Insertar en AVL)\n");
+        printf("2) Registrar Pedido de Despacho (Encolar en FIFO del lote más cercano a vencer)\n");
+        printf("3) Cancelar Pedido (buscar por order_id y eliminar, restaurando stock)\n");
+        printf("4) Baja de Producto (Eliminar nodo completo por fecha)\n");
+        printf("5) Reporte de Estado (In-Order: más próximo a más lejano)\n");
+        printf("6) Mostrar pedidos de una fecha específica\n");
+        printf("0) Salir\n");
+        printf("Selecciona opción: ");
+        if(scanf("%d", &opcion) != 1) { printf("Entrada inválida.\n"); break; }
+        flush_stdin();
+
+        if(opcion == 1) {
+            int fecha, cantidad;
+            char producto[64];
+            printf("Ingrese fecha de vencimiento (AAAAMMDD): ");
+            if(scanf("%d", &fecha) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+            printf("Ingrese nombre del producto: ");
+            if(!fgets(producto, sizeof(producto), stdin)) { strcpy(producto,""); }
+            // quitar newline
+            producto[strcspn(producto, "\n")] = '\0';
+            printf("Ingrese cantidad (stock) del lote: ");
+            if(scanf("%d", &cantidad) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+
+            if(searchNode(root, fecha)) {
+                printf("La fecha %d ya existe en el árbol: el producto NO puede procesarse según la regla.\n", fecha);
+            } else {
+                int inserted = 0;
+                root = insertAVL(root, fecha, producto, cantidad, &inserted);
+                if(inserted) printf("Nodo creado: fecha=%d producto='%s' stock=%d\n", fecha, producto, cantidad);
+                else printf("No insertado (clave duplicada?).\n");
+            }
+        }
+        else if(opcion == 2) {
+            if(!root) { printf("No hay lotes registrados.\n"); continue; }
+            Node *n = findNearestExpire(root);
+            if(!n) { printf("No se encontró lote para despachar.\n"); continue; }
+            printf("Nodo seleccionado (más cercano a vencer): fecha=%d producto=%s stock=%d\n", n->fecha, n->producto, n->stock);
+            char destino[64];
+            int cantidadSolicitada;
+            printf("Ingrese destino del pedido: ");
+            if(!fgets(destino, sizeof(destino), stdin)) strcpy(destino,"");
+            destino[strcspn(destino, "\n")] = '\0';
+            printf("Ingrese cantidad solicitada: ");
+            if(scanf("%d", &cantidadSolicitada) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+
+            if(cantidadSolicitada <= 0) { printf("Cantidad inválida.\n"); continue; }
+            if(cantidadSolicitada > n->stock) {
+                printf("No hay stock suficiente en este lote (stock=%d). Pedido no registrado.\n", n->stock);
+                continue;
+            }
+            Order *o = createOrder(nextOrderId++, destino, cantidadSolicitada);
+            enqueue(&n->pedidos, o);
+            n->stock -= cantidadSolicitada; // descontar stock ahora (pendiente)
+            printf("Pedido registrado con id=%d. Stock restante lote: %d\n", o->id, n->stock);
+        }
+        else if(opcion == 3) {
+            printf("Ingrese order_id a cancelar: ");
+            int id;
+            if(scanf("%d", &id) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+            int removed = removeOrderFromTree(root, id);
+            if(removed) printf("Pedido %d eliminado y stock restaurado.\n", id);
+            else printf("Pedido %d NO encontrado.\n", id);
+        }
+        else if(opcion == 4) {
+            printf("Ingrese fecha (AAAAMMDD) del lote a eliminar: ");
+            int f;
+            if(scanf("%d", &f) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+            if(!searchNode(root, f)) {
+                printf("No existe lote con fecha %d.\n", f);
+            } else {
+                root = deleteNode(root, f);
+                printf("Lote con fecha %d eliminado (cola liberada y árbol balanceado).\n", f);
+            }
+        }
+        else if(opcion == 5) {
+            if(!root) { printf("Árbol vacío.\n"); }
+            else {
+                printf("Reporte In-Order (más próximo a vencer -> más lejano):\n");
+                inorderReport(root);
+            }
+        }
+        else if(opcion == 6) {
+            printf("Ingrese fecha (AAAAMMDD) para ver pedidos: ");
+            int f;
+            if(scanf("%d", &f) != 1) { printf("Entrada inválida.\n"); flush_stdin(); continue; }
+            flush_stdin();
+            Node *n = searchNode(root, f);
+            if(!n) printf("No existe lote con fecha %d.\n", f);
+            else printOrders(n);
+        }
+        else if(opcion == 0) {
+            printf("Saliendo...\n");
+        }
+        else {
+            printf("Opción no válida.\n");
+        }
+
+    } while(opcion != 0);
+
+    freeTree(root);
+    return 0;
+}
